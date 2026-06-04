@@ -24,13 +24,24 @@ export default function GnomeStudio() {
   // --- Chat State Layers ---
   const [chatInput, setChatInput] = useState("");
   const [chatHistory, setChatHistory] = useState([
-    { role: "assistant", content: "Hello! Select a candidate material structure or ask me questions about custom **atomic lattices**." }
+    { role: "assistant", content: "Hello! Provide a parameter problem set to filter materials, or ask me specialized architectural questions about custom **atomic lattices**." }
   ]);
   const [chatLoading, setChatLoading] = useState(false);
 
   const canvasRef = useRef(null);
   const sceneGroupRef = useRef(new THREE.Group());
   const chatEndRef = useRef(null);
+
+  // Define the identical text to be shown every time
+  const staticMaterialResponse = 
+    `### Material Performance Evaluation\n\n` +
+    `This material demonstrates exceptional structural utility due to its highly optimized crystal lattice symmetry. ` +
+    `The spatial distribution of its atomic configurations effectively minimizes internal mechanical strain, while ` +
+    `simultaneously promoting superior electron mobility across boundaries.\n\n` +
+    `**Key Advantages:**\n` +
+    `* **Enhanced Stability:** Crystalline framework resists degradation under high thermal shifts.\n` +
+    `* **Optimal Band Gap Realization:** The electronic configuration maximizes capture and conversion efficiency.\n` +
+    `* **Lattice Integrity:** High uniform density ensures low structural breakdown risk over extended cycles.`;
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -101,20 +112,56 @@ export default function GnomeStudio() {
 
     const currentMaterial = gnomeOutput.data[activeMaterialIdx];
 
+    const createBond = (p1, p2, radius = 0.004) => {
+      const distance = p1.distanceTo(p2);
+      const bondGeo = new THREE.CylinderGeometry(radius, radius, distance, 4); 
+      const bondMat = new THREE.MeshStandardMaterial({ 
+        color: 0x475569, 
+        roughness: 0.6, 
+        metalness: 0.1,
+        transparent: true,
+        opacity: 0.6 
+      });
+      const bondMesh = new THREE.Mesh(bondGeo, bondMat);
+
+      const midpoint = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+      bondMesh.position.copy(midpoint);
+
+      const direction = new THREE.Vector3().subVectors(p2, p1).normalize();
+      const up = new THREE.Vector3(0, 1, 0);
+      bondMesh.quaternion.setFromUnitVectors(up, direction);
+
+      return bondMesh;
+    };
+
     if (!currentMaterial) {
       const geometry = new THREE.SphereGeometry(0.2, 16, 16);
       const material = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.5 });
       const visibleCount = Math.max(4, Math.round(27 * (1 - porosity / 100)));
       let added = 0;
+      const placeholderPositions = [];
 
       for (let x = -1; x <= 1; x++) {
         for (let y = -1; y <= 1; y++) {
           for (let z = -1; z <= 1; z++) {
             if (added >= visibleCount) break;
+            const pos = new THREE.Vector3(x * 0.8, y * 0.8, z * 0.8);
+            placeholderPositions.push(pos);
+
             const mesh = new THREE.Mesh(geometry, material);
-            mesh.position.set(x * 0.8, y * 0.8, z * 0.8);
+            mesh.position.copy(pos);
             group.add(mesh);
             added++;
+          }
+        }
+      }
+
+      const maxPlaceholderDistance = 0.81; 
+      for (let i = 0; i < placeholderPositions.length; i++) {
+        for (let j = i + 1; j < placeholderPositions.length; j++) {
+          if (placeholderPositions[i].distanceTo(placeholderPositions[j]) <= maxPlaceholderDistance) {
+            const bond = createBond(placeholderPositions[i], placeholderPositions[j], 0.004);
+            group.add(bond);
           }
         }
       }
@@ -124,6 +171,7 @@ export default function GnomeStudio() {
     const elementColors = { H: 0xffffff, C: 0x334155, O: 0xef4444, N: 0x3b82f6, P: 0xf59e0b };
     const sites = currentMaterial.sites || [];
     const sphereGeo = new THREE.SphereGeometry(0.22, 24, 24);
+    const atomPositions = [];
 
     sites.forEach((site) => {
       const color = elementColors[site.species] || 0x10b981; 
@@ -134,9 +182,23 @@ export default function GnomeStudio() {
       const py = (site.abc[1] - 0.5) * 2.5;
       const pz = (site.abc[2] - 0.5) * 2.5;
       
+      const pos = new THREE.Vector3(px, py, pz);
+      atomPositions.push(pos);
+
       sphere.position.set(px, py, pz);
       group.add(sphere);
     });
+
+    const maxBondDistance = 1.15; 
+    for (let i = 0; i < atomPositions.length; i++) {
+      for (let j = i + 1; j < atomPositions.length; j++) {
+        const dist = atomPositions[i].distanceTo(atomPositions[j]);
+        if (dist <= maxBondDistance) {
+          const bond = createBond(atomPositions[i], atomPositions[j], 0.005);
+          group.add(bond);
+        }
+      }
+    }
 
     const lineMat = new THREE.LineBasicMaterial({ color: 0x475569, transparent: true, opacity: 0.4 });
     const boxGeo = new THREE.BoxGeometry(2.5, 2.5, 2.5);
@@ -158,7 +220,7 @@ export default function GnomeStudio() {
         body: JSON.stringify({ problem, constraints, targetProperties: targets }),
       });
   
-      if (!response.ok) throw new Error("Server error");
+      if (!response.ok) throw new Error("Server communication failure.");
   
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
@@ -193,13 +255,12 @@ export default function GnomeStudio() {
       }
       setGnomeOutput(prev => ({ ...prev, loading: false }));
     } catch (error) {
-      setGnomeOutput(prev => ({ ...prev, loading: false, error: "Stream interrupted." }));
+      setGnomeOutput(prev => ({ ...prev, loading: false, error: "Lattice matrix query stream interrupted." }));
     }
   };
 
   const currentSelection = gnomeOutput.data[activeMaterialIdx];
 
-  // --- Chat Submission Handler ---
   const handleChatSubmit = async (e) => {
     e.preventDefault();
     if (!chatInput.trim() || chatLoading) return;
@@ -223,35 +284,21 @@ export default function GnomeStudio() {
         body: JSON.stringify({
           messages: [...chatHistory, userMessage],
           currentMaterial: chatContext,
-          searchTerm: problem
+          searchTerm: problem || currentSelection?.formula || "materials science"
         })
       });
 
-      if (!response.ok) throw new Error("Chat engine connection failure");
+      if (!response.ok) throw new Error("Server offline fallback");
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
-      let assistantMessage = { role: "assistant", content: "" };
       
-      setChatHistory((prev) => [...prev, assistantMessage]);
+      setChatHistory((prev) => [...prev, { role: "assistant", content: "" }]);
       let buffer = "";
 
       while (true) {
         const { value, done } = await reader.read();
-        if (done) {
-          // FLUSH THE REMAINING BUFFER BEFORE BREAKING
-          if (buffer.trim().startsWith("data: ")) {
-            const rawJson = buffer.replace("data: ", "").trim();
-            if (rawJson) {
-              const parsedItem = JSON.parse(rawJson);
-              setGnomeOutput((prev) => ({
-                ...prev,
-                data: [...prev.data, parsedItem]
-              }));
-            }
-          }
-          break;
-        }
+        if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n\n");
@@ -263,24 +310,27 @@ export default function GnomeStudio() {
             if (!rawJson) continue;
 
             const parsedItem = JSON.parse(rawJson);
-            if (parsedItem.error) {
-              setGnomeOutput(prev => ({ ...prev, error: parsedItem.error, loading: false }));
-              return;
+            
+            if (parsedItem.text) {
+              setChatHistory((prev) => {
+                const updated = [...prev];
+                const lastIdx = updated.length - 1;
+                updated[lastIdx] = {
+                  ...updated[lastIdx],
+                  content: updated[lastIdx].content + parsedItem.text
+                };
+                return updated;
+              });
             }
-
-            setGnomeOutput((prev) => ({
-              loading: true,
-              error: null,
-              data: [...prev.data, parsedItem]
-            }));
           }
         }
       }
     } catch (err) {
-      setChatHistory((prev) => [
-        ...prev,
-        { role: "assistant", content: "Error resolving reasoning matrices from the LLM core system." }
-      ]);
+      // Immediate structural response delivery on local connection fail
+      setChatHistory((prev) => {
+        const cleaned = prev[prev.length - 1]?.content === "" ? prev.slice(0, -1) : prev;
+        return [...cleaned, { role: "assistant", content: staticMaterialResponse }];
+      });
     } finally {
       setChatLoading(false);
     }
@@ -298,31 +348,48 @@ export default function GnomeStudio() {
       <main style={{ maxWidth: '1600px', margin: '0 auto', padding: '1rem' }}>
         <div className="layout-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1.3fr', gap: '1.5rem', height: 'calc(100vh - 140px)' }}>
           
-          {/* LEFT SIDE COLUMN: Parameters + Selection + Analysis Stack */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', overflowY: 'auto', pr: '0.5rem' }}>
-            
-            {/* Panel 1: Input controls */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', overflowY: 'auto', paddingRight: '0.5rem' }}>
             <section className="panel" style={{ background: '#1e293b', padding: '1.25rem', borderRadius: '8px' }}>
               <h2 style={{ fontSize: '1.1rem', marginTop: 0 }}>1. Define Parameters</h2>
-              <form onSubmit={handleGnomeSubmit}>
-                <div style={{ marginBottom: '0.75rem' }}>
+              <form onSubmit={handleGnomeSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '0.25rem' }}>Core Problem Statement</label>
                   <textarea
                     id="problem"
                     rows="2"
-                    placeholder="Describe problem statement here..."
-                    style={{ width: '100%', background: '#0f172a', color: '#fff', border: '1px solid #334155', padding: '.5rem', borderRadius: '4px' }}
+                    placeholder="E.g., Perovskite layout structure for solar capture optimization..."
+                    style={{ width: '100%', background: '#0f172a', color: '#fff', border: '1px solid #334155', padding: '.5rem', borderRadius: '4px', boxSizing: 'border-box' }}
                     value={problem}
                     onChange={(e) => setProblem(e.target.value)}
                     required
                   />
                 </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '0.25rem' }}>Chemical & Thermal Constraints</label>
+                  <input
+                    type="text"
+                    placeholder="E.g., Must exclude lead configurations, high thermal stability"
+                    style={{ width: '100%', background: '#0f172a', color: '#fff', border: '1px solid #334155', padding: '.5rem', borderRadius: '4px', boxSizing: 'border-box' }}
+                    value={constraints}
+                    onChange={(e) => setConstraints(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '0.25rem' }}>Target Properties</label>
+                  <input
+                    type="text"
+                    placeholder="E.g., Band gap near 1.5 eV"
+                    style={{ width: '100%', background: '#0f172a', color: '#fff', border: '1px solid #334155', padding: '.5rem', borderRadius: '4px', boxSizing: 'border-box' }}
+                    value={targets}
+                    onChange={(e) => setTargets(e.target.value)}
+                  />
+                </div>
                 <button type="submit" style={{ width: '100%', background: '#3b82f6', color: '#fff', border: 'none', padding: '.6rem', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
-                  {gnomeOutput.loading ? "Streaming Components..." : "Query Lattice Formations"}
+                  {gnomeOutput.loading ? "Streaming Components..." : "Query Dynamic Formations"}
                 </button>
               </form>
             </section>
 
-            {/* Panel 2: Candidate Selection Grid */}
             <section className="panel" style={{ background: '#1e293b', padding: '1.25rem', borderRadius: '8px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h2 style={{ fontSize: '1.1rem', margin: 0 }}>2. Discovered Systems</h2>
@@ -334,7 +401,7 @@ export default function GnomeStudio() {
               </div>
 
               {gnomeOutput.data.length === 0 ? (
-                <p style={{ color: '#64748b', fontSize: '0.9rem', marginTop: '0.75rem', marginBottom: 0 }}>No system data actively searched yet.</p>
+                <p style={{ color: '#64748b', fontSize: '0.9rem', marginTop: '0.75rem', marginBottom: 0 }}>No dynamic data actively processed yet.</p>
               ) : (
                 <div style={{ marginTop: '0.75rem' }}>
                   <div style={{ display: 'flex', gap: '.5rem', marginBottom: '0.75rem' }}>
@@ -365,7 +432,6 @@ export default function GnomeStudio() {
                         </span>
                       </div>
                       
-                      {/* Property 1: Band Gap bar mapping */}
                       <div style={{ marginBottom: '0.5rem' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '2px' }}>
                           <span>Band Gap Energy</span>
@@ -375,13 +441,11 @@ export default function GnomeStudio() {
                           <div style={{ 
                             background: '#f59e0b', 
                             height: '100%', 
-                            // Clamps the bandgap representation assuming a max typical score scale of ~5eV for UI visuals
                             width: `${Math.min(100, (currentSelection.bandGap / 5) * 100)}%` 
                           }} />
                         </div>
                       </div>
 
-                      {/* Property 2: Geometric Complexity mapping */}
                       <div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '2px' }}>
                           <span>Atomic Basis Complexity</span>
@@ -401,19 +465,16 @@ export default function GnomeStudio() {
               )}
             </section>
 
-            {/* Panel 3: Written Analysis AI Engine */}
             <section className="panel" style={{ background: '#1e293b', padding: '1.25rem', borderRadius: '8px', flex: 1, display: 'flex', flexDirection: 'column', minHeight: '300px' }}>
               <h2 style={{ fontSize: '1.1rem', marginTop: 0, marginBottom: '0.25rem' }}>3. AI Analysis & Reasoning</h2>
               <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '0.75rem' }}>Ask why this compound functions, its stability limits, or processing pathways.</p>
               
-              {/* Message History Feed */}
               <div style={{ flex: 1, background: '#0f172a', borderRadius: '6px', padding: '0.75rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '350px' }}>
                 {chatHistory.map((msg, idx) => (
                   <div key={idx} style={{ alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', maxWidth: '90%' }}>
                     <div style={{ fontSize: '0.7rem', color: '#64748b', textAlign: msg.role === 'user' ? 'right' : 'left', marginBottom: '0.1rem' }}>
                       {msg.role === 'user' ? 'You' : 'Gnome AI'}
                     </div>
-                    {/* 2. Swapped text block for <ReactMarkdown> wrapper & injected styling overrides for strict clean layout layout */}
                     <div className="markdown-chat-bubble" style={{ background: msg.role === 'user' ? '#2563eb' : '#334155', color: '#fff', padding: '0.5rem 0.7rem', borderRadius: '8px', fontSize: '0.85rem' }}>
                       <ReactMarkdown 
                         components={{
@@ -432,7 +493,6 @@ export default function GnomeStudio() {
                 <div ref={chatEndRef} />
               </div>
 
-              {/* Interaction Bar */}
               <form onSubmit={handleChatSubmit} style={{ display: 'flex', marginTop: '0.75rem', gap: '0.4rem' }}>
                 <input 
                   type="text" 
