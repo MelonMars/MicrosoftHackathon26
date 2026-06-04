@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import * as THREE from "three";
+import ReactMarkdown from "react-markdown";
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 const escapeHtml = (value) =>
   (value || "")
@@ -22,7 +24,7 @@ export default function GnomeStudio() {
   // --- Chat State Layers ---
   const [chatInput, setChatInput] = useState("");
   const [chatHistory, setChatHistory] = useState([
-    { role: "assistant", content: "Hello! Select a candidate material structure or ask me questions about custom atomic lattices." }
+    { role: "assistant", content: "Hello! Select a candidate material structure or ask me questions about custom **atomic lattices**." }
   ]);
   const [chatLoading, setChatLoading] = useState(false);
 
@@ -30,12 +32,10 @@ export default function GnomeStudio() {
   const sceneGroupRef = useRef(new THREE.Group());
   const chatEndRef = useRef(null);
 
-  // Auto-scroll chat window
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatHistory]);
 
-  // Three.js Scene Setup Engine
   useEffect(() => {
     if (!canvasRef.current) return;
 
@@ -55,6 +55,8 @@ export default function GnomeStudio() {
     scene.add(keyLight);
 
     scene.add(sceneGroupRef.current);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
 
     const handleResize = () => {
       if (!canvas.parentElement) return;
@@ -220,7 +222,8 @@ export default function GnomeStudio() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: [...chatHistory, userMessage],
-          currentMaterial: chatContext
+          currentMaterial: chatContext,
+          searchTerm: problem
         })
       });
 
@@ -235,25 +238,41 @@ export default function GnomeStudio() {
 
       while (true) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done) {
+          // FLUSH THE REMAINING BUFFER BEFORE BREAKING
+          if (buffer.trim().startsWith("data: ")) {
+            const rawJson = buffer.replace("data: ", "").trim();
+            if (rawJson) {
+              const parsedItem = JSON.parse(rawJson);
+              setGnomeOutput((prev) => ({
+                ...prev,
+                data: [...prev.data, parsedItem]
+              }));
+            }
+          }
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n\n");
-        buffer = lines.pop();
+        buffer = lines.pop() || "";
 
         for (const line of lines) {
           if (line.startsWith("data: ")) {
             const rawJson = line.replace("data: ", "").trim();
             if (!rawJson) continue;
 
-            const parsedChunk = JSON.parse(rawJson);
-            if (parsedChunk.text) {
-              assistantMessage.content += parsedChunk.text;
-              setChatHistory((prev) => [
-                ...prev.slice(0, -1),
-                { ...assistantMessage }
-              ]);
+            const parsedItem = JSON.parse(rawJson);
+            if (parsedItem.error) {
+              setGnomeOutput(prev => ({ ...prev, error: parsedItem.error, loading: false }));
+              return;
             }
+
+            setGnomeOutput((prev) => ({
+              loading: true,
+              error: null,
+              data: [...prev.data, parsedItem]
+            }));
           }
         }
       }
@@ -277,7 +296,6 @@ export default function GnomeStudio() {
       </header>
 
       <main style={{ maxWidth: '1600px', margin: '0 auto', padding: '1rem' }}>
-        {/* Dual Column Master layout optimized for vertical stacked tools on the left side */}
         <div className="layout-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1.3fr', gap: '1.5rem', height: 'calc(100vh - 140px)' }}>
           
           {/* LEFT SIDE COLUMN: Parameters + Selection + Analysis Stack */}
@@ -337,16 +355,53 @@ export default function GnomeStudio() {
                   </div>
 
                   {currentSelection && (
-                    <div style={{ background: '#0f172a', padding: '0.75rem', borderRadius: '6px', fontSize: '0.85rem' }}>
-                      <h3 style={{ color: '#60a5fa', margin: '0 0 .25rem 0', fontSize: '1rem' }}>Formula: {escapeHtml(currentSelection.formula)}</h3>
-                      <p style={{ margin: '0.15rem 0' }}><strong>ID:</strong> {escapeHtml(currentSelection.id)} | <strong>Band Gap:</strong> {currentSelection.bandGap} eV</p>
+                    <div style={{ background: '#0f172a', padding: '1rem', borderRadius: '6px', fontSize: '0.85rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                        <h3 style={{ color: '#60a5fa', margin: 0, fontSize: '1.1rem' }}>
+                          Formula: {escapeHtml(currentSelection.formula)}
+                        </h3>
+                        <span style={{ background: '#1e293b', padding: '2px 6px', borderRadius: '4px', fontSize: '0.75rem', color: '#10b981', border: '1px solid #334155' }}>
+                          ID: {escapeHtml(currentSelection.id)}
+                        </span>
+                      </div>
+                      
+                      {/* Property 1: Band Gap bar mapping */}
+                      <div style={{ marginBottom: '0.5rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '2px' }}>
+                          <span>Band Gap Energy</span>
+                          <span style={{ color: '#fff' }}>{currentSelection.bandGap} eV</span>
+                        </div>
+                        <div style={{ background: '#334155', height: '6px', borderRadius: '3px', overflow: 'hidden' }}>
+                          <div style={{ 
+                            background: '#f59e0b', 
+                            height: '100%', 
+                            // Clamps the bandgap representation assuming a max typical score scale of ~5eV for UI visuals
+                            width: `${Math.min(100, (currentSelection.bandGap / 5) * 100)}%` 
+                          }} />
+                        </div>
+                      </div>
+
+                      {/* Property 2: Geometric Complexity mapping */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '2px' }}>
+                          <span>Atomic Basis Complexity</span>
+                          <span style={{ color: '#fff' }}>{currentSelection.sites?.length || 0} sites</span>
+                        </div>
+                        <div style={{ background: '#334155', height: '6px', borderRadius: '3px', overflow: 'hidden' }}>
+                          <div style={{ 
+                            background: '#3b82f6', 
+                            height: '100%', 
+                            width: `${Math.min(100, ((currentSelection.sites?.length || 4) / 32) * 100)}%` 
+                          }} />
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
               )}
             </section>
 
-            {/* Panel 3: MOVED HERE - Written Analysis AI Engine */}
+            {/* Panel 3: Written Analysis AI Engine */}
             <section className="panel" style={{ background: '#1e293b', padding: '1.25rem', borderRadius: '8px', flex: 1, display: 'flex', flexDirection: 'column', minHeight: '300px' }}>
               <h2 style={{ fontSize: '1.1rem', marginTop: 0, marginBottom: '0.25rem' }}>3. AI Analysis & Reasoning</h2>
               <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '0.75rem' }}>Ask why this compound functions, its stability limits, or processing pathways.</p>
@@ -358,8 +413,19 @@ export default function GnomeStudio() {
                     <div style={{ fontSize: '0.7rem', color: '#64748b', textAlign: msg.role === 'user' ? 'right' : 'left', marginBottom: '0.1rem' }}>
                       {msg.role === 'user' ? 'You' : 'Gnome AI'}
                     </div>
-                    <div style={{ background: msg.role === 'user' ? '#2563eb' : '#334155', color: '#fff', padding: '0.5rem 0.7rem', borderRadius: '8px', fontSize: '0.85rem', whiteSpace: 'pre-wrap' }}>
-                      {msg.content}
+                    {/* 2. Swapped text block for <ReactMarkdown> wrapper & injected styling overrides for strict clean layout layout */}
+                    <div className="markdown-chat-bubble" style={{ background: msg.role === 'user' ? '#2563eb' : '#334155', color: '#fff', padding: '0.5rem 0.7rem', borderRadius: '8px', fontSize: '0.85rem' }}>
+                      <ReactMarkdown 
+                        components={{
+                          p: ({node, ...props}) => <p style={{ margin: '0 0 0.5rem 0' }} {...props} />,
+                          ul: ({node, ...props}) => <ul style={{ margin: '0 0 0.5rem 0', paddingLeft: '1.2rem' }} {...props} />,
+                          ol: ({node, ...props}) => <ol style={{ margin: '0 0 0.5rem 0', paddingLeft: '1.2rem' }} {...props} />,
+                          li: ({node, ...props}) => <li style={{ marginBottom: '0.25rem' }} {...props} />,
+                          code: ({node, ...props}) => <code style={{ background: '#0f172a', padding: '2px 4px', borderRadius: '3px', fontFamily: 'monospace' }} {...props} />
+                        }}
+                      >
+                        {msg.content}
+                      </ReactMarkdown>
                     </div>
                   </div>
                 ))}
@@ -386,7 +452,6 @@ export default function GnomeStudio() {
             </section>
           </div>
 
-          {/* RIGHT SIDE COLUMN: Dominant 3D Render Canvas Frame */}
           <div style={{ background: '#1e293b', padding: '1.25rem', borderRadius: '8px', display: 'flex', flexDirection: 'column' }}>
             <h2 style={{ fontSize: '1.2rem', marginTop: 0, marginBottom: '0.25rem' }}>4. Interactive Atomic Lattice Renderer</h2>
             <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: '0 0 1rem 0' }}>
@@ -398,21 +463,6 @@ export default function GnomeStudio() {
             <div style={{ flex: 1, background: '#0f172a', position: 'relative', borderRadius: '6px', overflow: 'hidden' }}>
               <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
             </div>
-
-            {!currentSelection && (
-              <div style={{ marginTop: '1rem' }}>
-                <label htmlFor="porosity" style={{ fontSize: '0.85rem' }}>Adjust Structural Porosity Vector: {porosity}%</label>
-                <input 
-                  id="porosity" 
-                  type="range" 
-                  min="0" 
-                  max="100" 
-                  style={{ width: '100%', marginTop: '0.25rem' }}
-                  value={porosity} 
-                  onChange={(e) => setPorosity(Number(e.target.value))}
-                />
-              </div>
-            )}
           </div>
 
         </div>
