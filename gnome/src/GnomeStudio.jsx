@@ -24,19 +24,19 @@ export default function GnomeStudio() {
   const canvasRef = useRef(null);
   const spheresRef = useRef([]);
 
-  useEffect(() => {
-    const loadRecipe = async () => {
-      try {
-        const response = await fetch("/api/recipe");
-        if (!response.ok) throw new Error();
-        const data = await response.json();
-        setRecipe({ loading: false, data, error: null });
-      } catch {
-        setRecipe({ loading: false, data: null, error: "Recipe unavailable." });
-      }
-    };
-    loadRecipe();
-  }, []);
+  // useEffect(() => {
+  //   const loadRecipe = async () => {
+  //     try {
+  //       const response = await fetch("/api/recipe");
+  //       if (!response.ok) throw new Error();
+  //       const data = await response.json();
+  //       setRecipe({ loading: false, data, error: null });
+  //     } catch {
+  //       setRecipe({ loading: false, data: null, error: "Recipe unavailable." });
+  //     }
+  //   };
+  //   loadRecipe();
+  // }, []);
 
   useEffect(() => {
     if (!canvasRef.current || !window.THREE) return;
@@ -139,35 +139,59 @@ export default function GnomeStudio() {
   // --- Form Handler: Submit Problem Statement ---
   const handleGnomeSubmit = async (e) => {
     e.preventDefault();
-    console.log("Submitting to Gnome with:", { problem, constraints, targets });
-    setGnomeOutput({ loading: true, data: null, error: null });
-
+    setGnomeOutput({ loading: true, data: [], error: null }); // Notice data is now an array
+  
     try {
       const response = await fetch("http://127.0.0.1:8000/materials", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          problem,
-          constraints,
-          targetProperties: targets,
-        }),
+        body: JSON.stringify({ problem, constraints, targetProperties: targets }),
       });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => null);
-        const message =
-          err?.detail?.error ||
-          (typeof err?.detail === "string" ? err.detail : null) ||
-          "Unable to reach Gnome right now.";
-        setGnomeOutput({ loading: false, data: null, error: message });
-        return;
+  
+      if (!response.ok) throw new Error("Server error");
+  
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+  
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+  
+        // Append incoming stream chunk to text buffer
+        buffer += decoder.decode(value, { stream: true });
+        
+        // Split chunks by SSE boundary markers
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop(); // Keep incomplete trailing lines in buffer
+  
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const rawJson = line.replace("data: ", "").trim();
+            if (!rawJson) continue;
+  
+            const parsedItem = JSON.parse(rawJson);
+            
+            if (parsedItem.error) {
+              setGnomeOutput(prev => ({ ...prev, error: parsedItem.error, loading: false }));
+              return;
+            }
+  
+            // Progressively append items into state array
+            setGnomeOutput((prev) => ({
+              loading: true, // keep true while streaming
+              error: null,
+              data: prev.data ? [...prev.data, parsedItem] : [parsedItem]
+            }));
+          }
+        }
       }
-
-      const data = await response.json();
-      setGnomeOutput({ loading: false, data, error: null });
-    } catch {
-      console.error("Fetch implementation failed:", error);
-      setGnomeOutput({ loading: false, data: null, error: "Unable to reach Gnome right now." });
+  
+      // Streaming successfully finished
+      setGnomeOutput(prev => ({ ...prev, loading: false }));
+  
+    } catch (error) {
+      setGnomeOutput({ loading: false, data: null, error: "Stream interrupted." });
     }
   };
 
@@ -180,19 +204,19 @@ export default function GnomeStudio() {
 
     setPaperResults({ loading: true, data: null, error: null });
 
-    try {
-      const response = await fetch(`/api/papers?query=${encodeURIComponent(paperQuery.trim())}`);
-      if (!response.ok) throw new Error();
-      const data = await response.json();
+    // try {
+    //   const response = await fetch(`/api/papers?query=${encodeURIComponent(paperQuery.trim())}`);
+    //   if (!response.ok) throw new Error();
+    //   const data = await response.json();
 
-      if (!data.papers?.length) {
-        setPaperResults({ loading: false, data: null, error: "No papers found. Try another query." });
-      } else {
-        setPaperResults({ loading: false, data: data.papers, error: null });
-      }
-    } catch {
-      setPaperResults({ loading: false, data: null, error: "Paper search is unavailable right now." });
-    }
+    //   if (!data.papers?.length) {
+    //     setPaperResults({ loading: false, data: null, error: "No papers found. Try another query." });
+    //   } else {
+    //     setPaperResults({ loading: false, data: data.papers, error: null });
+    //   }
+    // } catch {
+    //   setPaperResults({ loading: false, data: null, error: "Paper search is unavailable right now." });
+    // }
   };
 
   return (
@@ -249,37 +273,38 @@ export default function GnomeStudio() {
           </form>
 
           {/* Gnome Output Container */}
-          {(gnomeOutput.loading || gnomeOutput.data || gnomeOutput.error) && (
-            <div className="output">
-              {gnomeOutput.loading && "Running Gnome…"}
-              {gnomeOutput.error && gnomeOutput.error}
-              {gnomeOutput.data && (
-                <>
-                  <h3>Material system</h3>
-                  <p>{escapeHtml(gnomeOutput.data.materialSystem)}</p>
-                  <h3>Design proposal</h3>
-                  <ul>
-                    {gnomeOutput.data.proposal.map((item, idx) => (
-                      <li key={idx}>{escapeHtml(item)}</li>
-                    ))}
-                  </ul>
-                  <h3>Testing plan</h3>
-                  <ul>
-                    {gnomeOutput.data.testingPlan.map((item, idx) => (
-                      <li key={idx}>{escapeHtml(item)}</li>
-                    ))}
-                  </ul>
-                  <h3>Manufacturing overview</h3>
-                  <ul>
-                    {gnomeOutput.data.manufacturingOverview.map((item, idx) => (
-                      <li key={idx}>{escapeHtml(item)}</li>
-                    ))}
-                  </ul>
-                  <p><strong>Note:</strong> {escapeHtml(gnomeOutput.data.safetyNotes)}</p>
-                </>
-              )}
+          {/* Gnome Output Container */}
+{(gnomeOutput.loading || gnomeOutput.data || gnomeOutput.error) && (
+  <div className="output">
+    {gnomeOutput.loading && gnomeOutput.data?.length === 0 && "Running Gnome…"}
+    {gnomeOutput.error && <p className="error-msg">{gnomeOutput.error}</p>}
+    
+    {gnomeOutput.data && gnomeOutput.data.length > 0 && (
+      <>
+        <h2>Discovered Materials ({gnomeOutput.data.length})</h2>
+        <div className="materials-stream-list">
+          {gnomeOutput.data.map((material, idx) => (
+            <div key={material.id || idx} className="material-card" style={{ marginBottom: '1.5rem', borderBottom: '1px solid #334155', paddingBottom: '1rem' }}>
+              <h3>System: {escapeHtml(material.formula)}</h3>
+              <p><strong>MP ID:</strong> {escapeHtml(material.id)}</p>
+              <p><strong>Band Gap:</strong> {material.bandGap} eV</p>
+              
+              <h4>Atomic Sites ({material.sites?.length || 0})</h4>
+              <ul>
+                {material.sites?.slice(0, 5).map((site, sIdx) => (
+                  <li key={sIdx}>
+                    Element: <strong>{escapeHtml(site.species)}</strong> — Coords: [{site.abc.map(n => n.toFixed(3)).join(', ')}]
+                  </li>
+                ))}
+                {material.sites?.length > 5 && <li>...and {material.sites.length - 5} more sites</li>}
+              </ul>
             </div>
-          )}
+          ))}
+        </div>
+      </>
+    )}
+  </div>
+)}
         </section>
 
         {/* Section 2: Search Papers */}

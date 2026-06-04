@@ -1,79 +1,76 @@
 import os
-from typing import List, Optional
+import json
+import asyncio
+from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from mp_api.client import MPRester
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# 1. Define the incoming request body model matching your React frontend keys
+origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins, 
+    allow_credentials=True,
+    allow_methods=["*"],   
+    allow_headers=["*"],     
+)
 class MaterialProblemRequest(BaseModel):
-    problem: str = Field(..., description="The material problem statement from the user")
-    constraints: Optional[str] = Field(default="", description="Comma-separated constraints")
-    targetProperties: Optional[str] = Field(default="", description="Target performance properties")
+    problem: str
+    constraints: Optional[str] = ""
+    targetProperties: Optional[str] = ""
 
-class SiteModel(BaseModel):
-    species: str = Field(..., description="The chemical element symbol (e.g., 'Li')")
-    abc: List[float] = Field(..., description="Fractional coordinates [a, b, c]")
-
-class MaterialResponse(BaseModel):
-    id: str = Field(..., description="The unique Materials Project ID")
-    formula: str = Field(..., description="The pretty/reduced chemical formula")
-    bandGap: float = Field(..., description="The band gap energy in eV")
-    lattice: List[List[float]] = Field(..., description="3x3 matrix representing the lattice vectors")
-    sites: List[SiteModel] = Field(..., description="List of atomic site positions and species")
-
-@app.post("/materials", response_model=List[MaterialResponse]) # Assumes MaterialResponse is defined above
-def get_gnome_materials(
-    payload: MaterialProblemRequest, 
-    api_key: Optional[str] = Query(default=None, description="Optional MP API key")
-):
-    mp_api_key = api_key or os.getenv("MP_API_KEY")
-    
-    if not mp_api_key:
-        raise HTTPException(
-            status_code=400, 
-            detail="Materials Project API key is missing. Provide it via the 'api_key' query parameter or set the MP_API_KEY environment variable."
+def fetch_mp_data(api_key: str):
+    elements = ["C", "O", "H"]
+    max_energy_above_hull = 0.05
+    with MPRester(api_key) as mpr:
+        return mpr.materials.summary.search(
+            elements=elements,
+            energy_above_hull=(0, max_energy_above_hull),
+            fields=["material_id", "formula_pretty", "structure", "band_gap"]
         )
 
-    # 💡 ARCHITECTURE NOTE:
-    # Your frontend sends natural language strings (like payload.problem = "Replace petroleum clamshells...").
-    # The Materials Project API requires strict chemical elements (like ["Li", "O"]). 
-    # For now, we extract hardcoded/fallback search parameters so the API call doesn't crash.
-    elements = ["C", "O", "H"]  # Fallback elements common to organic/compostable packaging materials
-    max_energy_above_hull = 0.05
+@app.post("/materials")
+async def get_gnome_materials_stream(
+    payload: MaterialProblemRequest, 
+    api_key: Optional[str] = Query(default=None)
+):
+    mp_api_key = api_key or os.getenv("MP_API_KEY")
+    if not mp_api_key:
+        raise HTTPException(status_code=400, detail="Missing MP_API_KEY")
 
-    try:
-        with MPRester(mp_api_key) as mpr:
-            # Query the Materials Project API
-            docs = mpr.materials.summary.search(
-                elements=elements,
-                energy_above_hull=(0, max_energy_above_hull),
-                fields=["material_id", "formula_pretty", "structure", "band_gap"]
-            )
-            
-            results = []
-            for doc in docs:
+    async def event_generator():
+        try:
+            loop = asyncio.get_event_loop()
+            docs = await loop.run_in_executor(None, fetch_mp_data, mp_api_key)
+
+            for idx, doc in enumerate(docs):
                 structure = doc.structure
-                lattice_matrix = structure.lattice.matrix.tolist()
                 
-                sites = [
-                    {
-                        "species": str(site.specie.symbol), 
-                        "abc": list(site.frac_coords)
-                    }
-                    for site in structure
-                ]
-                
-                results.append({
+                material_item = {
                     "id": str(doc.material_id),
                     "formula": doc.formula_pretty,
                     "bandGap": float(doc.band_gap),
-                    "lattice": lattice_matrix,
-                    "sites": sites
-                })
+                    "lattice": structure.lattice.matrix.tolist(),
+                    "sites": [
+                        {"species": str(site.specie.symbol), "abc": list(site.frac_coords)}
+                        for site in structure
+                    ]
+                }
                 
-            return results
+                yield f"data: {json.dumps(material_item)}\n\n"
+                
+                await asyncio.sleep(0.01) 
+                
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Materials Project API error: {str(e)}")
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
