@@ -17,13 +17,23 @@ export default function GnomeStudio() {
   
   const [gnomeOutput, setGnomeOutput] = useState({ loading: false, data: [], error: null });
   const [activeMaterialIdx, setActiveMaterialIdx] = useState(0);
-  const [paperQuery, setPaperQuery] = useState("");
-  const [paperResults, setPaperResults] = useState({ loading: false, data: null, error: null });
-  const [recipe, setRecipe] = useState({ loading: false, data: null, error: null });
   const [porosity, setPorosity] = useState(40);
+
+  // --- Chat State Layers ---
+  const [chatInput, setChatInput] = useState("");
+  const [chatHistory, setChatHistory] = useState([
+    { role: "assistant", content: "Hello! Select a candidate material structure or ask me questions about custom atomic lattices." }
+  ]);
+  const [chatLoading, setChatLoading] = useState(false);
 
   const canvasRef = useRef(null);
   const sceneGroupRef = useRef(new THREE.Group());
+  const chatEndRef = useRef(null);
+
+  // Auto-scroll chat window
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatHistory]);
 
   // Three.js Scene Setup Engine
   useEffect(() => {
@@ -44,7 +54,6 @@ export default function GnomeStudio() {
     keyLight.position.set(5, 8, 5);
     scene.add(keyLight);
 
-    // Add our atomic group to the main scene
     scene.add(sceneGroupRef.current);
 
     const handleResize = () => {
@@ -78,7 +87,6 @@ export default function GnomeStudio() {
   useEffect(() => {
     const group = sceneGroupRef.current;
     
-    // Clear old children
     while (group.children.length > 0) {
       const obj = group.children[0];
       if (obj.geometry) obj.geometry.dispose();
@@ -91,11 +99,9 @@ export default function GnomeStudio() {
 
     const currentMaterial = gnomeOutput.data[activeMaterialIdx];
 
-    // Fallback Mock Lattice Model if backend data has not been pulled yet
     if (!currentMaterial) {
       const geometry = new THREE.SphereGeometry(0.2, 16, 16);
       const material = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.5 });
-      
       const visibleCount = Math.max(4, Math.round(27 * (1 - porosity / 100)));
       let added = 0;
 
@@ -113,25 +119,15 @@ export default function GnomeStudio() {
       return;
     }
 
-    // Color mapper for chemical elements
-    const elementColors = {
-      H: 0xffffff,
-      C: 0x334155,
-      O: 0xef4444,
-      N: 0x3b82f6,
-      P: 0xf59e0b
-    };
-
-    // Build real unit lattice coordinates from Materials Project Data stream
+    const elementColors = { H: 0xffffff, C: 0x334155, O: 0xef4444, N: 0x3b82f6, P: 0xf59e0b };
     const sites = currentMaterial.sites || [];
     const sphereGeo = new THREE.SphereGeometry(0.22, 24, 24);
 
     sites.forEach((site) => {
-      const color = elementColors[site.species] || 0x10b981; // Fallback emerald green
+      const color = elementColors[site.species] || 0x10b981; 
       const mat = new THREE.MeshStandardMaterial({ color, metalness: 0.2, roughness: 0.3 });
       const sphere = new THREE.Mesh(sphereGeo, mat);
 
-      // Fractional to Cartesian Mapping adjustments (centered at 0,0,0)
       const px = (site.abc[0] - 0.5) * 2.5;
       const py = (site.abc[1] - 0.5) * 2.5;
       const pz = (site.abc[2] - 0.5) * 2.5;
@@ -140,7 +136,6 @@ export default function GnomeStudio() {
       group.add(sphere);
     });
 
-    // Draw unit box wire lines connecting structures
     const lineMat = new THREE.LineBasicMaterial({ color: 0x475569, transparent: true, opacity: 0.4 });
     const boxGeo = new THREE.BoxGeometry(2.5, 2.5, 2.5);
     const edges = new THREE.EdgesGeometry(boxGeo);
@@ -200,124 +195,224 @@ export default function GnomeStudio() {
     }
   };
 
-  const handlePaperSearch = async () => {
-    if (!paperQuery.trim()) return;
-    setPaperResults({ loading: true, data: null, error: null });
-    // Mock Paper fetch execution loop can be safely un-commented out here if handling citation structures
-  };
-
   const currentSelection = gnomeOutput.data[activeMaterialIdx];
+
+  // --- Chat Submission Handler ---
+  const handleChatSubmit = async (e) => {
+    e.preventDefault();
+    if (!chatInput.trim() || chatLoading) return;
+
+    const userMessage = { role: "user", content: chatInput };
+    setChatHistory((prev) => [...prev, userMessage]);
+    setChatInput("");
+    setChatLoading(true);
+
+    const chatContext = currentSelection ? {
+      id: currentSelection.id,
+      formula: currentSelection.formula,
+      bandGap: currentSelection.bandGap,
+      sites_count: currentSelection.sites?.length || 0
+    } : null;
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...chatHistory, userMessage],
+          currentMaterial: chatContext
+        })
+      });
+
+      if (!response.ok) throw new Error("Chat engine connection failure");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let assistantMessage = { role: "assistant", content: "" };
+      
+      setChatHistory((prev) => [...prev, assistantMessage]);
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const rawJson = line.replace("data: ", "").trim();
+            if (!rawJson) continue;
+
+            const parsedChunk = JSON.parse(rawJson);
+            if (parsedChunk.text) {
+              assistantMessage.content += parsedChunk.text;
+              setChatHistory((prev) => [
+                ...prev.slice(0, -1),
+                { ...assistantMessage }
+              ]);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      setChatHistory((prev) => [
+        ...prev,
+        { role: "assistant", content: "Error resolving reasoning matrices from the LLM core system." }
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
 
   return (
     <>
-      <header className="hero">
+      <header className="hero" style={{ padding: '1rem 2rem', borderBottom: '1px solid #334155' }}>
         <div>
-          <p className="eyebrow">AI-assisted materials discovery</p>
-          <h1>Gnome Materials Studio</h1>
-          <p className="subhead">Define target properties, fetch crystalline compositions, and isolate structures interactively.</p>
+          <p className="eyebrow" style={{ color: '#60a5fa', margin: 0 }}>AI-assisted materials discovery</p>
+          <h1 style={{ margin: '0.25rem 0' }}>Gnome Materials Studio</h1>
         </div>
       </header>
 
-      <main style={{ maxWidth: '1200px', margin: '0 auto', padding: '1rem' }}>
-        <div className="layout-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
+      <main style={{ maxWidth: '1600px', margin: '0 auto', padding: '1rem' }}>
+        {/* Dual Column Master layout optimized for vertical stacked tools on the left side */}
+        <div className="layout-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1.3fr', gap: '1.5rem', height: 'calc(100vh - 140px)' }}>
           
-          {/* LEFT: Control Form & Paginated Stream UI Card */}
-          <div className="left-column">
-            <section className="panel" style={{ background: '#1e293b', padding: '1.5rem', borderRadius: '8px', marginBottom: '1.5rem' }}>
-              <h2>1. Define Parameters</h2>
+          {/* LEFT SIDE COLUMN: Parameters + Selection + Analysis Stack */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', overflowY: 'auto', pr: '0.5rem' }}>
+            
+            {/* Panel 1: Input controls */}
+            <section className="panel" style={{ background: '#1e293b', padding: '1.25rem', borderRadius: '8px' }}>
+              <h2 style={{ fontSize: '1.1rem', marginTop: 0 }}>1. Define Parameters</h2>
               <form onSubmit={handleGnomeSubmit}>
-                <div style={{ marginBottom: '1rem' }}>
-                  <label htmlFor="problem" style={{ display: 'block', marginBottom: '.5rem' }}>Problem Statement</label>
+                <div style={{ marginBottom: '0.75rem' }}>
                   <textarea
                     id="problem"
                     rows="2"
-                    style={{ width: '100%', background: '#0f172a', color: '#fff', border: '1px solid #334155', padding: '.5rem' }}
+                    placeholder="Describe problem statement here..."
+                    style={{ width: '100%', background: '#0f172a', color: '#fff', border: '1px solid #334155', padding: '.5rem', borderRadius: '4px' }}
                     value={problem}
                     onChange={(e) => setProblem(e.target.value)}
                     required
                   />
                 </div>
-                <button type="submit" style={{ background: '#3b82f6', color: '#fff', border: 'none', padding: '.75rem 1.5rem', borderRadius: '4px', cursor: 'pointer' }}>
+                <button type="submit" style={{ width: '100%', background: '#3b82f6', color: '#fff', border: 'none', padding: '.6rem', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
                   {gnomeOutput.loading ? "Streaming Components..." : "Query Lattice Formations"}
                 </button>
               </form>
             </section>
 
-            {/* Pagination Controls & Cards panel view */}
-            <section className="panel" style={{ background: '#1e293b', padding: '1.5rem', borderRadius: '8px' }}>
+            {/* Panel 2: Candidate Selection Grid */}
+            <section className="panel" style={{ background: '#1e293b', padding: '1.25rem', borderRadius: '8px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h2>2. Discovered Materials Selection</h2>
+                <h2 style={{ fontSize: '1.1rem', margin: 0 }}>2. Discovered Systems</h2>
                 {gnomeOutput.data.length > 0 && (
-                  <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
-                    Record {activeMaterialIdx + 1} of {gnomeOutput.data.length}
+                  <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+                    {activeMaterialIdx + 1} / {gnomeOutput.data.length}
                   </span>
                 )}
               </div>
 
               {gnomeOutput.data.length === 0 ? (
-                <p style={{ color: '#64748b' }}>No system data actively searched yet.</p>
+                <p style={{ color: '#64748b', fontSize: '0.9rem', marginTop: '0.75rem', marginBottom: 0 }}>No system data actively searched yet.</p>
               ) : (
-                <div>
-                  {/* Slider Pagination Toolbar */}
-                  <div style={{ display: 'flex', gap: '.5rem', margin: '1rem 0' }}>
+                <div style={{ marginTop: '0.75rem' }}>
+                  <div style={{ display: 'flex', gap: '.5rem', marginBottom: '0.75rem' }}>
                     <button 
                       disabled={activeMaterialIdx === 0} 
                       onClick={() => setActiveMaterialIdx(p => p - 1)}
-                      style={{ flex: 1, padding: '.5rem', background: '#334155', color: '#fff', border: 'none', cursor: 'pointer' }}
+                      style={{ flex: 1, padding: '.4rem', background: '#334155', color: '#fff', border: 'none', cursor: 'pointer', borderRadius: '4px', fontSize: '0.85rem' }}
                     >
-                      ← Previous Candidate
+                      ← Prev
                     </button>
                     <button 
                       disabled={activeMaterialIdx === gnomeOutput.data.length - 1} 
                       onClick={() => setActiveMaterialIdx(p => p + 1)}
-                      style={{ flex: 1, padding: '.5rem', background: '#334155', color: '#fff', border: 'none', cursor: 'pointer' }}
+                      style={{ flex: 1, padding: '.4rem', background: '#334155', color: '#fff', border: 'none', cursor: 'pointer', borderRadius: '4px', fontSize: '0.85rem' }}
                     >
-                      Next Candidate →
+                      Next →
                     </button>
                   </div>
 
                   {currentSelection && (
-                    <div style={{ background: '#0f172a', padding: '1rem', borderRadius: '6px' }}>
-                      <h3 style={{ color: '#60a5fa', margin: '0 0 .5rem 0' }}>Formula: {escapeHtml(currentSelection.formula)}</h3>
-                      <p><strong>Materials Project ID:</strong> {escapeHtml(currentSelection.id)}</p>
-                      <p><strong>Electronic Band Gap:</strong> {currentSelection.bandGap} eV</p>
-                      <p><strong>Total Unit Cell Atoms:</strong> {currentSelection.sites?.length}</p>
+                    <div style={{ background: '#0f172a', padding: '0.75rem', borderRadius: '6px', fontSize: '0.85rem' }}>
+                      <h3 style={{ color: '#60a5fa', margin: '0 0 .25rem 0', fontSize: '1rem' }}>Formula: {escapeHtml(currentSelection.formula)}</h3>
+                      <p style={{ margin: '0.15rem 0' }}><strong>ID:</strong> {escapeHtml(currentSelection.id)} | <strong>Band Gap:</strong> {currentSelection.bandGap} eV</p>
                     </div>
                   )}
                 </div>
               )}
             </section>
-          </div>
 
-          {/* RIGHT: Atomic Render Viewport Panel */}
-          <div className="right-column">
-            <section className="panel" style={{ background: '#1e293b', padding: '1.5rem', borderRadius: '8px', height: '100%', display: 'flex', flexDirection: 'column' }}>
-              <h2>3. Interactive Atomic Lattice Renderer</h2>
-              <p style={{ fontSize: '0.9rem', color: '#94a3b8' }}>
-                {currentSelection 
-                  ? `Displaying unit crystal configuration vector space properties for ${currentSelection.formula}.`
-                  : "Displaying placeholder uniform macro-porous material layout structure geometry."}
-              </p>
-
-              <div style={{ flex: 1, minHeight: '350px', background: '#0f172a', position: 'relative', borderRadius: '6px', overflow: 'hidden' }}>
-                <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+            {/* Panel 3: MOVED HERE - Written Analysis AI Engine */}
+            <section className="panel" style={{ background: '#1e293b', padding: '1.25rem', borderRadius: '8px', flex: 1, display: 'flex', flexDirection: 'column', minHeight: '300px' }}>
+              <h2 style={{ fontSize: '1.1rem', marginTop: 0, marginBottom: '0.25rem' }}>3. AI Analysis & Reasoning</h2>
+              <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: '0.75rem' }}>Ask why this compound functions, its stability limits, or processing pathways.</p>
+              
+              {/* Message History Feed */}
+              <div style={{ flex: 1, background: '#0f172a', borderRadius: '6px', padding: '0.75rem', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '350px' }}>
+                {chatHistory.map((msg, idx) => (
+                  <div key={idx} style={{ alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', maxWidth: '90%' }}>
+                    <div style={{ fontSize: '0.7rem', color: '#64748b', textAlign: msg.role === 'user' ? 'right' : 'left', marginBottom: '0.1rem' }}>
+                      {msg.role === 'user' ? 'You' : 'Gnome AI'}
+                    </div>
+                    <div style={{ background: msg.role === 'user' ? '#2563eb' : '#334155', color: '#fff', padding: '0.5rem 0.7rem', borderRadius: '8px', fontSize: '0.85rem', whiteSpace: 'pre-wrap' }}>
+                      {msg.content}
+                    </div>
+                  </div>
+                ))}
+                <div ref={chatEndRef} />
               </div>
 
-              {!currentSelection && (
-                <div style={{ marginTop: '1rem' }}>
-                  <label htmlFor="porosity">Adjust Structural Porosity Vector: {porosity}%</label>
-                  <input 
-                    id="porosity" 
-                    type="range" 
-                    min="0" 
-                    max="100" 
-                    style={{ width: '100%' }}
-                    value={porosity} 
-                    onChange={(e) => setPorosity(Number(e.target.value))}
-                  />
-                </div>
-              )}
+              {/* Interaction Bar */}
+              <form onSubmit={handleChatSubmit} style={{ display: 'flex', marginTop: '0.75rem', gap: '0.4rem' }}>
+                <input 
+                  type="text" 
+                  placeholder={currentSelection ? `Ask about ${currentSelection.formula}...` : "Ask a materials question..."}
+                  style={{ flex: 1, background: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem' }}
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                />
+                <button 
+                  type="submit" 
+                  disabled={chatLoading}
+                  style={{ background: '#10b981', color: '#fff', border: 'none', padding: '0 0.8rem', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.85rem' }}
+                >
+                  {chatLoading ? "..." : "Ask"}
+                </button>
+              </form>
             </section>
+          </div>
+
+          {/* RIGHT SIDE COLUMN: Dominant 3D Render Canvas Frame */}
+          <div style={{ background: '#1e293b', padding: '1.25rem', borderRadius: '8px', display: 'flex', flexDirection: 'column' }}>
+            <h2 style={{ fontSize: '1.2rem', marginTop: 0, marginBottom: '0.25rem' }}>4. Interactive Atomic Lattice Renderer</h2>
+            <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: '0 0 1rem 0' }}>
+              {currentSelection 
+                ? `Displaying unit crystal configuration space properties for ${currentSelection.formula}.`
+                : "Displaying placeholder uniform macro-porous material layout structure geometry."}
+            </p>
+
+            <div style={{ flex: 1, background: '#0f172a', position: 'relative', borderRadius: '6px', overflow: 'hidden' }}>
+              <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+            </div>
+
+            {!currentSelection && (
+              <div style={{ marginTop: '1rem' }}>
+                <label htmlFor="porosity" style={{ fontSize: '0.85rem' }}>Adjust Structural Porosity Vector: {porosity}%</label>
+                <input 
+                  id="porosity" 
+                  type="range" 
+                  min="0" 
+                  max="100" 
+                  style={{ width: '100%', marginTop: '0.25rem' }}
+                  value={porosity} 
+                  onChange={(e) => setPorosity(Number(e.target.value))}
+                />
+              </div>
+            )}
           </div>
 
         </div>
