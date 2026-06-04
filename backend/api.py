@@ -1,42 +1,32 @@
 import os
 from typing import List, Optional
-
-import requests
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from mp_api.client import MPRester
 from pydantic import BaseModel, Field
+from mp_api.client import MPRester
 
-app = FastAPI(
-    title="Gnome Materials API",
-    description="An API to fetch stable materials matching specific elements from the Materials Project.",
-    version="1.0.0",
-)
+app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 1. Define the incoming request body model matching your React frontend keys
+class MaterialProblemRequest(BaseModel):
+    problem: str = Field(..., description="The material problem statement from the user")
+    constraints: Optional[str] = Field(default="", description="Comma-separated constraints")
+    targetProperties: Optional[str] = Field(default="", description="Target performance properties")
 
 class SiteModel(BaseModel):
     species: str = Field(..., description="The chemical element symbol (e.g., 'Li')")
     abc: List[float] = Field(..., description="Fractional coordinates [a, b, c]")
 
 class MaterialResponse(BaseModel):
-    id: str
-    formula: str
-    bandGap: float
+    id: str = Field(..., description="The unique Materials Project ID")
+    formula: str = Field(..., description="The pretty/reduced chemical formula")
+    bandGap: float = Field(..., description="The band gap energy in eV")
     lattice: List[List[float]] = Field(..., description="3x3 matrix representing the lattice vectors")
-    sites: List[SiteModel]
+    sites: List[SiteModel] = Field(..., description="List of atomic site positions and species")
 
-@app.get("/materials", response_model=List[MaterialResponse])
+@app.post("/materials", response_model=List[MaterialResponse]) # Assumes MaterialResponse is defined above
 def get_gnome_materials(
-    elements: List[str] = Query(default=["Li", "O"], description="List of elements to search for"),
-    max_energy_above_hull: float = Query(default=0.05, description="Maximum energy above hull in eV/atom"),
-    api_key: Optional[str] = Query(default=None, description="Optional MP API key. Defaults to MP_API_KEY env var if not provided.")
+    payload: MaterialProblemRequest, 
+    api_key: Optional[str] = Query(default=None, description="Optional MP API key")
 ):
     mp_api_key = api_key or os.getenv("MP_API_KEY")
     
@@ -46,8 +36,16 @@ def get_gnome_materials(
             detail="Materials Project API key is missing. Provide it via the 'api_key' query parameter or set the MP_API_KEY environment variable."
         )
 
+    # 💡 ARCHITECTURE NOTE:
+    # Your frontend sends natural language strings (like payload.problem = "Replace petroleum clamshells...").
+    # The Materials Project API requires strict chemical elements (like ["Li", "O"]). 
+    # For now, we extract hardcoded/fallback search parameters so the API call doesn't crash.
+    elements = ["C", "O", "H"]  # Fallback elements common to organic/compostable packaging materials
+    max_energy_above_hull = 0.05
+
     try:
         with MPRester(mp_api_key) as mpr:
+            # Query the Materials Project API
             docs = mpr.materials.summary.search(
                 elements=elements,
                 energy_above_hull=(0, max_energy_above_hull),
@@ -57,7 +55,6 @@ def get_gnome_materials(
             results = []
             for doc in docs:
                 structure = doc.structure
-                
                 lattice_matrix = structure.lattice.matrix.tolist()
                 
                 sites = [

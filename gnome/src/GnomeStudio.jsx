@@ -143,7 +143,7 @@ export default function GnomeStudio() {
     setGnomeOutput({ loading: true, data: null, error: null });
 
     try {
-      const response = await fetch("/api/gnome", {
+      const response = await fetch("http://127.0.0.1:8000/materials", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -166,6 +166,7 @@ export default function GnomeStudio() {
       const data = await response.json();
       setGnomeOutput({ loading: false, data, error: null });
     } catch {
+      console.error("Fetch implementation failed:", error);
       setGnomeOutput({ loading: false, data: null, error: "Unable to reach Gnome right now." });
     }
   };
